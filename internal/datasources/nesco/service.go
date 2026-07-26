@@ -10,7 +10,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/m4hi2/MeterAlertBot/internal/config"
 	"github.com/m4hi2/MeterAlertBot/internal/datasources"
@@ -57,21 +56,23 @@ func (s *Service) GetBalance(ctx context.Context, id datasources.Identifier) (da
 
 	ctx = context.WithValue(ctx, datasources.CtxKeyDatasource, datasources.CtxDatasourceNesco)
 
-	// Visit homepage to establish session
-	if err := s.visitHomepage(ctx); err != nil {
-		return datasources.Balance{}, fmt.Errorf("visit homepage: %w", err)
+	// 1. Visit homepage to establish session
+	if err := s.visitHome(ctx); err != nil {
+		return datasources.Balance{}, fmt.Errorf("visit home: %w", err)
 	}
 
-	// Switch language to English
+	// 2. Switch language to English
 	if err := s.switchToEnglish(ctx); err != nil {
 		return datasources.Balance{}, fmt.Errorf("switch language: %w", err)
 	}
 
+	// 3. Get CSRF token
 	token, err := s.getCSRFToken(ctx)
 	if err != nil {
 		return datasources.Balance{}, fmt.Errorf("get csrf token: %w", err)
 	}
 
+	// 4. Post to fetch balance
 	resp, err := s.fetchBalance(ctx, id.AccountNumber, token)
 	if err != nil {
 		return datasources.Balance{}, err
@@ -103,7 +104,7 @@ func (s *Service) Name() string {
 	return "nesco"
 }
 
-func (s *Service) visitHomepage(ctx context.Context) error {
+func (s *Service) visitHome(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.BasePath, nil)
 	if err != nil {
 		return err
@@ -116,7 +117,6 @@ func (s *Service) visitHomepage(ctx context.Context) error {
 		return err
 	}
 	defer resp.Body.Close()
-	// Even if status is not 200, we might have cookies; proceed
 	return nil
 }
 
@@ -128,7 +128,6 @@ func (s *Service) switchToEnglish(ctx context.Context) error {
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("Referer", s.cfg.BasePath)
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("language switch request: %w", err)
@@ -145,7 +144,7 @@ func (s *Service) getCSRFToken(ctx context.Context) (string, error) {
 	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-	req.Header.Set("Referer", s.cfg.BasePath+languageEn) // simulate navigation from language switch
+	req.Header.Set("Referer", s.cfg.BasePath+languageEn) // mimic navigation
 
 	resp, err := s.client.Do(req)
 	if err != nil {
@@ -153,12 +152,13 @@ func (s *Service) getCSRFToken(ctx context.Context) (string, error) {
 	}
 	defer resp.Body.Close()
 
+	// Debug
 	fmt.Printf("DEBUG: GET /pre/panel status: %d\n", resp.StatusCode)
 	bodyBytes, _ := io.ReadAll(resp.Body)
 	body := string(bodyBytes)
 	fmt.Printf("DEBUG: body length: %d\n", len(body))
 	if len(body) > 0 {
-		fmt.Printf("DEBUG: first 500 chars of body:\n%s\n", truncate(body, 500))
+		fmt.Printf("DEBUG: first 500 chars:\n%s\n", truncate(body, 500))
 	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("panel page status %d, body snippet: %s", resp.StatusCode, truncate(body, 200))
@@ -194,12 +194,13 @@ func (s *Service) getCSRFToken(ctx context.Context) (string, error) {
 	find(doc)
 
 	if token == "" {
+		// Fallback: hidden input
 		fallbackToken := extractTokenFromHiddenInput(body)
 		if fallbackToken != "" {
 			fmt.Printf("DEBUG: found token in hidden input: %s\n", fallbackToken)
 			return fallbackToken, nil
 		}
-		return "", fmt.Errorf("csrf-token not found")
+		return "", fmt.Errorf("csrf-token not found in response")
 	}
 	return token, nil
 }
@@ -234,10 +235,10 @@ func (s *Service) fetchBalance(ctx context.Context, custNo, token string) (*Nesc
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("User-Agent", userAgent)
-	req.Header.Set("Referer", s.cfg.BasePath+panelPath)
-	req.Header.Set("Origin", s.cfg.BasePath)
 	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Referer", s.cfg.BasePath+panelPath)
+	req.Header.Set("Origin", s.cfg.BasePath)
 
 	slog.DebugContext(ctx, "nesco posting for balance", "cust_no", custNo)
 
@@ -255,6 +256,7 @@ func (s *Service) fetchBalance(ctx context.Context, custNo, token string) (*Nesc
 	return parseBalancePage(ctx, resp.Body)
 }
 
+// parseBalancePage (if not in parse.go, keep it; otherwise remove)
 func parseBalancePage(ctx context.Context, body io.Reader) (*NescoBalanceResp, error) {
 	doc, err := html.Parse(body)
 	if err != nil {

@@ -20,7 +20,36 @@ import (
 	"golang.org/x/time/rate"
 )
 
-const name = "nesco"
+const (
+	name      = "nesco"
+	userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+)
+
+// Constants from dto.go (they are defined in the same package)
+const (
+	AccountNumber = "Consumer No."
+	MeterNumber   = "Meter No."
+	Balance       = "Remaining Balance (Tk.)"
+)
+
+const (
+	panelPath      = "/pre/panel"
+	languageEn     = "/language/en"
+	submitRecharge = "Recharge History"
+	paramCustNo    = "cust_no"
+	paramToken     = "_token"
+	paramSubmit    = "submit"
+)
+
+type NescoBalanceResp struct {
+	Code int    `json:"code"`
+	Desc string `json:"desc"`
+	Data struct {
+		AccountNo string `json:"accountNo"`
+		MeterNo   string `json:"meterNo"`
+		Balance   string `json:"balance"`
+	} `json:"data"`
+}
 
 type Service struct {
 	client  *http.Client
@@ -102,25 +131,44 @@ func (s *Service) switchToEnglish(ctx context.Context) error {
 		return err
 	}
 	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-
+	req.Header.Set("User-Agent", userAgent)
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("language switch request: %w", err)
 	}
 	defer resp.Body.Close()
-
 	return nil
 }
 
 func (s *Service) getCSRFToken(ctx context.Context) (string, error) {
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.BasePath+panelPath, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.BasePath+panelPath, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("User-Agent", userAgent)
+
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 
-	doc, err := html.Parse(resp.Body)
+	// --- DEBUG: log status and body snippet ---
+	fmt.Printf("DEBUG: GET /pre/panel status: %d\n", resp.StatusCode)
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	body := string(bodyBytes)
+	fmt.Printf("DEBUG: body length: %d\n", len(body))
+	if len(body) > 0 {
+		fmt.Printf("DEBUG: first 500 chars of body:\n%s\n", truncate(body, 500))
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("panel page status %d, body snippet: %s", resp.StatusCode, truncate(body, 200))
+	}
+	// --- end debug ---
+
+	// Re‑parse the body (we already read it, need to re‑create reader)
+	doc, err := html.Parse(strings.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("parse html: %w", err)
 	}
@@ -150,10 +198,33 @@ func (s *Service) getCSRFToken(ctx context.Context) (string, error) {
 	find(doc)
 
 	if token == "" {
-		return "", fmt.Errorf("csrf-token meta tag not found")
+		// Also try to find hidden input named "_token" as a fallback
+		fallbackToken := extractTokenFromHiddenInput(body)
+		if fallbackToken != "" {
+			fmt.Printf("DEBUG: found token in hidden input: %s\n", fallbackToken)
+			return fallbackToken, nil
+		}
+		return "", fmt.Errorf("csrf-token meta tag not found in response")
 	}
-	slog.DebugContext(ctx, "nesco csrf token extracted", "length", len(token))
 	return token, nil
+}
+
+// fallback extraction from hidden input
+func extractTokenFromHiddenInput(body string) string {
+	start := strings.Index(body, `name="_token"`)
+	if start == -1 {
+		return ""
+	}
+	valueIdx := strings.Index(body[start:], `value="`)
+	if valueIdx == -1 {
+		return ""
+	}
+	start += valueIdx + len(`value="`)
+	end := strings.Index(body[start:], `"`)
+	if end == -1 {
+		return ""
+	}
+	return body[start : start+end]
 }
 
 func (s *Service) fetchBalance(ctx context.Context, custNo, token string) (*NescoBalanceResp, error) {
@@ -162,9 +233,13 @@ func (s *Service) fetchBalance(ctx context.Context, custNo, token string) (*Nesc
 	form.Set(paramCustNo, custNo)
 	form.Set(paramSubmit, submitRecharge)
 
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
 		s.cfg.BasePath+panelPath, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", userAgent)
 
 	slog.DebugContext(ctx, "nesco posting for balance", "cust_no", custNo)
 
@@ -175,13 +250,14 @@ func (s *Service) fetchBalance(ctx context.Context, custNo, token string) (*Nesc
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("upstream status %d", resp.StatusCode)
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("upstream status %d, body: %s", resp.StatusCode, truncate(string(body), 200))
 	}
 
 	return parseBalancePage(ctx, resp.Body)
 }
 
-// parseBalancePage extracts balance and other fields from HTML (same logic as python-nesco)
+// parseBalancePage extracts balance and other fields from HTML (same logic as original)
 func parseBalancePage(ctx context.Context, body io.Reader) (*NescoBalanceResp, error) {
 	doc, err := html.Parse(body)
 	if err != nil {
@@ -195,14 +271,17 @@ func parseBalancePage(ctx context.Context, body io.Reader) (*NescoBalanceResp, e
 	walk = func(n *html.Node) {
 		if n.Type == html.ElementNode {
 			if n.Data == "label" {
-				currentLabel = strings.TrimSpace(n.FirstChild.Data)
-				currentLabel = strings.ReplaceAll(currentLabel, "\n", " ")
+				if n.FirstChild != nil {
+					currentLabel = strings.TrimSpace(n.FirstChild.Data)
+					currentLabel = strings.ReplaceAll(currentLabel, "\n", " ")
+				}
 			}
-			if n.Data == "input" {
+			if n.Data == "input" && currentLabel != "" {
 				for _, attr := range n.Attr {
-					if attr.Key == "value" && currentLabel != "" {
+					if attr.Key == "value" {
 						data[currentLabel] = strings.TrimSpace(attr.Val)
 						currentLabel = ""
+						break
 					}
 				}
 			}
@@ -221,15 +300,8 @@ func parseBalancePage(ctx context.Context, body io.Reader) (*NescoBalanceResp, e
 	meter, ok2 := data[MeterNumber]
 	balanceStr, ok3 := data[Balance]
 	if !ok1 || !ok2 || !ok3 {
-		return nil, fmt.Errorf(
-			"missing required NESCO fields: account=%v meter=%v balance=%v",
-			ok1,
-			ok2,
-			ok3,
-		)
+		return nil, fmt.Errorf("missing required NESCO fields: account=%v meter=%v balance=%v", ok1, ok2, ok3)
 	}
-
-	slog.DebugContext(context.Background(), "nesco balance extracted", "data", data)
 
 	return &NescoBalanceResp{
 		Code: http.StatusOK,
@@ -243,4 +315,12 @@ func parseBalancePage(ctx context.Context, body io.Reader) (*NescoBalanceResp, e
 			Balance:   balanceStr,
 		},
 	}, nil
+}
+
+// truncate helper
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "..."
 }

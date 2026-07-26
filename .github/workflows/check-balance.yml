@@ -1,0 +1,25 @@
+name: Check NESCO Balance
+
+on:
+  workflow_dispatch:
+    inputs:
+      account:
+        description: 'NESCO Account Number'
+        required: true
+        default: '37005309'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - run: go mod download
+
+      - name: Fetch balance
+        run: go run main.go nesco balance ${{ inputs.account }}

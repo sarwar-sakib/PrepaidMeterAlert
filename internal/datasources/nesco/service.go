@@ -20,36 +20,7 @@ import (
 	"golang.org/x/time/rate"
 )
 
-const (
-	name      = "nesco"
-	userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
-
-// Constants from dto.go (they are defined in the same package)
-const (
-	AccountNumber = "Consumer No."
-	MeterNumber   = "Meter No."
-	Balance       = "Remaining Balance (Tk.)"
-)
-
-const (
-	panelPath      = "/pre/panel"
-	languageEn     = "/language/en"
-	submitRecharge = "Recharge History"
-	paramCustNo    = "cust_no"
-	paramToken     = "_token"
-	paramSubmit    = "submit"
-)
-
-type NescoBalanceResp struct {
-	Code int    `json:"code"`
-	Desc string `json:"desc"`
-	Data struct {
-		AccountNo string `json:"accountNo"`
-		MeterNo   string `json:"meterNo"`
-		Balance   string `json:"balance"`
-	} `json:"data"`
-}
+const userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
 type Service struct {
 	client  *http.Client
@@ -122,7 +93,7 @@ func (s *Service) GetBalance(ctx context.Context, id datasources.Identifier) (da
 }
 
 func (s *Service) Name() string {
-	return name
+	return "nesco"
 }
 
 func (s *Service) switchToEnglish(ctx context.Context) error {
@@ -167,7 +138,6 @@ func (s *Service) getCSRFToken(ctx context.Context) (string, error) {
 	}
 	// --- end debug ---
 
-	// Re‑parse the body (we already read it, need to re‑create reader)
 	doc, err := html.Parse(strings.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("parse html: %w", err)
@@ -198,7 +168,7 @@ func (s *Service) getCSRFToken(ctx context.Context) (string, error) {
 	find(doc)
 
 	if token == "" {
-		// Also try to find hidden input named "_token" as a fallback
+		// Fallback: try hidden input
 		fallbackToken := extractTokenFromHiddenInput(body)
 		if fallbackToken != "" {
 			fmt.Printf("DEBUG: found token in hidden input: %s\n", fallbackToken)
@@ -209,7 +179,6 @@ func (s *Service) getCSRFToken(ctx context.Context) (string, error) {
 	return token, nil
 }
 
-// fallback extraction from hidden input
 func extractTokenFromHiddenInput(body string) string {
 	start := strings.Index(body, `name="_token"`)
 	if start == -1 {
@@ -257,7 +226,8 @@ func (s *Service) fetchBalance(ctx context.Context, custNo, token string) (*Nesc
 	return parseBalancePage(ctx, resp.Body)
 }
 
-// parseBalancePage extracts balance and other fields from HTML (same logic as original)
+// parseBalancePage - if this function already exists in a separate parse.go, remove it from here.
+// Otherwise keep it.
 func parseBalancePage(ctx context.Context, body io.Reader) (*NescoBalanceResp, error) {
 	doc, err := html.Parse(body)
 	if err != nil {
@@ -317,7 +287,6 @@ func parseBalancePage(ctx context.Context, body io.Reader) (*NescoBalanceResp, e
 	}, nil
 }
 
-// truncate helper
 func truncate(s string, n int) string {
 	if len(s) <= n {
 		return s
